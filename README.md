@@ -1,2 +1,2 @@
 # wmf
-Utilities and configuration for WMF projects
+Utilities for WMF projects
