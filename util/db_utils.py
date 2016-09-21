@@ -175,13 +175,15 @@ def execute_hive_expression(query, priority = False):
     os.system(cmd)
     
 
-# From stat directly #
 
-def exec_hive_stat2(query, priority = False):
+def exec_hive_stat2(query, priority = False, verbose = True):
     if priority:
         query = "SET mapreduce.job.queuename=priority;" + query
-    cmd = """hive -e \" """ +query+ """ \" """ 
-    os.system(cmd)
+    cmd = """hive -e \" """ + query + """ \" """ 
+    if verbose:
+        print(cmd)
+    ret = os.system(cmd)
+    return ret
 
 def query_hive_stat2(query, file_name, priority = False, delete = True, delim = '\t', quoting=0):
     if priority:

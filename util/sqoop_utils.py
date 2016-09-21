@@ -4,6 +4,27 @@ import sys
 import argparse
 import json
 
+from db_utils import exec_hive_stat2 as exec_hive
+"""
+Utility for sqooping wikipedia prod tables into hive. The tables currently
+supported are:
+-page
+-redirect
+-langlinks
+-pagelinks
+-pageprops
+-revision
+
+Initially we just sqoop the raw data. Then we define a query to turn each table
+into a canonical form,
+where for each field in a table that corresponds to a page, we add the
+namespace and whether it is a redirect.
+
+"""
+
+####################################################################
+####################################################################
+
 # main namespace articles (no redirects)
 page_sqoop_query = """
 sqoop import                                                        \
@@ -13,7 +34,7 @@ sqoop import                                                        \
   --delete-target-dir                                               \
   --username research                                               \
   --password-file /user/ellery/sqoop.password                       \
-  --split-by a.page_id                                              \
+  --split-by page_id                                              \
   --hive-import                                                     \
   --hive-database %(hive_db)s                                       \
   --create-hive-table                                               \
@@ -21,12 +42,34 @@ sqoop import                                                        \
   --hive-delims-replacement ' '                                  \
   --query '
 SELECT
-  a.page_id AS page_id,
-  CAST(a.page_title AS CHAR(255) CHARSET utf8) AS page_title
-FROM page a
-WHERE $CONDITIONS AND page_namespace = 0 AND page_is_redirect = 0
+  page_id,
+  CAST(page_title AS CHAR(255) CHARSET utf8) AS page_title,
+  page_is_redirect,
+  page_namespace
+FROM page 
+WHERE $CONDITIONS
 '  
-"""                                        
+"""  
+
+
+# this is a noop, the table is already clean
+clean_page_query = """
+CREATE TABLE  %(hive_db)s.%(result_table)s 
+ROW FORMAT DELIMITED
+FIELDS TERMINATED BY '\t'
+STORED AS TEXTFILE
+AS SELECT 
+  page_id,
+  page_namespace,
+  page_is_redirect,
+  page_title
+FROM
+  %(hive_db)s.%(raw_table)s
+"""
+
+####################################################################
+####################################################################
+
 
 # main namespace redirects
 redirect_sqoop_query = """
@@ -37,7 +80,7 @@ sqoop import                                                        \
   --delete-target-dir                                               \
   --username research                                               \
   --password-file /user/ellery/sqoop.password                       \
-  --split-by b.rd_from                                              \
+  --split-by rd_from                                              \
   --hive-import                                                     \
   --hive-database %(hive_db)s                                        \
   --create-hive-table                                               \
@@ -45,37 +88,36 @@ sqoop import                                                        \
   --hive-delims-replacement ' '                                  \
   --query '
 SELECT
-  b.rd_from AS rd_from,
-  CAST(b.rd_title AS CHAR(255) CHARSET utf8) AS rd_title
-FROM redirect b
-WHERE $CONDITIONS AND rd_namespace = 0
-'   
-"""              
-
-langlinks_sqoop_query = """
-sqoop import                                                      \
-  --connect jdbc:mysql://analytics-store.eqiad.wmnet/%(mysql_db)s      \
-  --verbose                                                         \
-  --target-dir /tmp/$(mktemp -u -p '' -t ${USER}_sqoop_2XXXXX)      \
-  --delete-target-dir                                               \
-  --username research                                               \
-  --password-file /user/ellery/sqoop.password                       \
-  --split-by a.ll_from                                              \
-  --hive-import                                                     \
-  --hive-database %(hive_db)s                                        \
-  --create-hive-table                                               \
-  --hive-table %(result_table)s                                         \
-  --hive-delims-replacement ' '                                  \
-  --query '
-SELECT
-  a.ll_from AS ll_from,
-  CAST(a.ll_title AS CHAR(255) CHARSET utf8) AS ll_title,
-  CAST(a.ll_lang AS CHAR(20) CHARSET utf8) AS ll_lang
-FROM langlinks a
+  rd_from,
+  CAST(rd_title AS CHAR(255) CHARSET utf8) AS rd_title,
+  rd_namespace
+FROM redirect
 WHERE $CONDITIONS
-'
+'   
 """
 
+clean_redirect_query = """
+CREATE TABLE  %(hive_db)s.%(result_table)s 
+ROW FORMAT DELIMITED
+FIELDS TERMINATED BY '\t'
+STORED AS TEXTFILE
+AS SELECT 
+  pfrom.page_id as rd_from_id,
+  pfrom.page_namespace as rd_from_namespace,
+  pfrom.page_is_redirect as rd_from_is_redirect,
+  pfrom.page_title as rd_from_page_title,
+  pto.page_id as rd_to_id,
+  pto.page_namespace as rd_to_namespace,
+  pto.page_is_redirect as rd_to_is_redirect,
+  pto.page_title as rd_to_page_title
+FROM
+  %(hive_db)s.%(raw_table)s a 
+  JOIN %(hive_db)s.%(page_table)s pfrom ON ( a.rd_from = pfrom.page_id)
+  JOIN %(hive_db)s.%(page_table)s pto ON ( a.rd_title = pto.page_title AND pto.page_namespace = a.rd_namespace)
+"""              
+
+####################################################################
+####################################################################
 
 revision_sqoop_query = """
 sqoop import                                                      \
@@ -105,6 +147,25 @@ WHERE $CONDITIONS
 '
 """
 
+clean_revision_query = """
+CREATE TABLE  %(hive_db)s.%(result_table)s 
+ROW FORMAT DELIMITED
+FIELDS TERMINATED BY '\t'
+STORED AS TEXTFILE
+AS SELECT
+  a.*,
+  b.page_id as rev_page_id,
+  b.page_namespace as rev_page_namespace,
+  b.page_is_redirect as rev_page_is_redirect,
+  b.page_title as rev_page_title
+FROM
+  %(hive_db)s.%(raw_table)s a JOIN %(hive_db)s.%(page_table)s b ON ( a.rev_page = b.page_id)
+"""
+####################################################################
+####################################################################
+
+
+# main namespace pagelinks
 pagelinks_sqoop_query = """
 sqoop import                                                  \
   --connect jdbc:mysql://analytics-store.eqiad.wmnet/%(mysql_db)s      \
@@ -113,7 +174,7 @@ sqoop import                                                  \
   --delete-target-dir                                               \
   --username research                                               \
   --password-file /user/ellery/sqoop.password                                            \
-  --split-by a.pl_from                                              \
+  --split-by pl_from                                              \
   --hive-import                                                     \
   --hive-database %(hive_db)s                                            \
   --create-hive-table                                               \
@@ -121,14 +182,37 @@ sqoop import                                                  \
   --hive-delims-replacement ' '                                  \
   --query '
 SELECT
-  a.pl_from AS pl_from,
-  CAST(a.pl_title AS CHAR(255) CHARSET utf8) AS pl_title
-FROM pagelinks a
-WHERE pl_namespace = 0
-AND pl_from_namespace = 0
-AND $CONDITIONS
+  pl_from,
+  CAST(pl_title AS CHAR(255) CHARSET utf8) AS pl_title,
+  pl_from_namespace,
+  pl_namespace
+FROM pagelinks
+WHERE $CONDITIONS
 '
 """
+
+clean_pagelinks_query = """
+CREATE TABLE  %(hive_db)s.%(result_table)s 
+ROW FORMAT DELIMITED
+FIELDS TERMINATED BY '\t'
+STORED AS TEXTFILE
+AS SELECT
+  pfrom.page_id as pl_from_id,
+  pfrom.page_namespace as pl_from_namespace,
+  pfrom.page_is_redirect as pl_from_is_redirect,
+  pfrom.page_title as pl_from_page_title,
+  pto.page_id as pl_to_id,
+  pto.page_namespace as pl_to_namespace,
+  pto.page_is_redirect as pl_to_is_redirect,
+  pto.page_title as pl_to_page_title
+FROM
+  %(hive_db)s.%(raw_table)s a 
+  JOIN %(hive_db)s.%(page_table)s pfrom ON ( a.pl_from = pfrom.page_id)
+  JOIN %(hive_db)s.%(page_table)s pto ON ( a.pl_title = pto.page_title AND pto.page_namespace = a.pl_namespace)
+"""
+
+####################################################################
+####################################################################
 
 page_props_sqoop_query = """
 sqoop import                                                  \
@@ -138,7 +222,7 @@ sqoop import                                                  \
   --delete-target-dir                                               \
   --username research                                               \
   --password-file /user/ellery/sqoop.password                       \
-  --split-by a.pp_page                                              \
+  --split-by pp_page                                              \
   --hive-import                                                     \
   --hive-database %(hive_db)s                                            \
   --create-hive-table                                               \
@@ -146,76 +230,83 @@ sqoop import                                                  \
   --hive-delims-replacement ' '                                  \
   --query '
 SELECT
-  a.pp_page AS pp_page,
-  CAST(a.pp_propname AS CHAR(60) CHARSET utf8) AS pp_propname
-FROM page_props a
+  pp_page,
+  CAST(pp_propname AS CHAR(60) CHARSET utf8) AS pp_propname,
+  CAST(pp_value AS CHAR(256) CHARSET utf8) AS pp_value
+FROM page_props
 WHERE $CONDITIONS
 '
 """
 
-page_props_join_query = """
+clean_page_props_query = """
 CREATE TABLE  %(hive_db)s.%(result_table)s 
 ROW FORMAT DELIMITED
 FIELDS TERMINATED BY '\t'
 STORED AS TEXTFILE
-AS SELECT 
-regexp_replace(b.page_title, ' ', '_') as page_title,
-pp_propname as propname
-FROM %(hive_db)s.%(raw_table)s a JOIN %(hive_db)s.%(raw_page_table)s b ON ( a.pp_page = b.page_id)
+AS SELECT
+  page_id,
+  page_namespace,
+  page_is_redirect, 
+  page_title,
+  pp_propname as propname,
+  pp_value as value
+FROM
+  %(hive_db)s.%(raw_table)s a JOIN %(hive_db)s.%(page_table)s b ON ( a.pp_page = b.page_id)
 """
 
 
-pagelinks_join_query = """
-CREATE TABLE  %(hive_db)s.%(result_table)s 
-ROW FORMAT DELIMITED
-FIELDS TERMINATED BY '\t'
-STORED AS TEXTFILE
-AS SELECT 
-regexp_replace(b.page_title, ' ', '_') as pl_from,
-regexp_replace(a.pl_title, ' ', '_') as pl_to
-FROM %(hive_db)s.%(raw_table)s a JOIN %(hive_db)s.%(raw_page_table)s b ON ( a.pl_from = b.page_id)
-"""
+####################################################################
+####################################################################
 
 
-redirect_join_query = """
-CREATE TABLE  %(hive_db)s.%(result_table)s 
-ROW FORMAT DELIMITED
-FIELDS TERMINATED BY '\t'
-STORED AS TEXTFILE
-AS SELECT 
-regexp_replace(b.page_title, ' ', '_') as rd_from,
-regexp_replace(a.rd_title, ' ', '_') as rd_to
-FROM %(hive_db)s.%(raw_table)s a JOIN %(hive_db)s.%(raw_page_table)s b ON ( a.rd_from = b.page_id)
+"""
+The langlinks table is insane.
+Title are represented in 'FULLPAGENAMEE style', instead of
+providing a title and namespace.
+
+Docs: https://www.mediawiki.org/wiki/Manual:Langlinks_table
+Example: Kategorie:Wikipedia:Lizenzvorlage fr uufreii Dateie
+
+This needs more parsing work. Also note that the titles use spaces instead of 
+under scores
 """
 
-langlinks_join_query = """
-CREATE TABLE  %(hive_db)s.%(result_table)s 
-ROW FORMAT DELIMITED
-FIELDS TERMINATED BY '\t'
-STORED AS TEXTFILE
-AS SELECT 
-regexp_replace(b.page_title, ' ', '_' ) as ll_from,
-regexp_replace(a.ll_title, ' ', '_')  as ll_to,
-a.ll_lang as ll_lang
-FROM %(hive_db)s.%(raw_table)s a JOIN %(hive_db)s.%(raw_page_table)s b ON ( a.ll_from = b.page_id)
-"""
+#langlinks_sqoop_query = """
+#sqoop import                                                      \
+#  --connect jdbc:mysql://analytics-store.eqiad.wmnet/%(mysql_db)s      \
+#  --verbose                                                         \
+#  --target-dir /tmp/$(mktemp -u -p '' -t ${USER}_sqoop_2XXXXX)      \
+#  --delete-target-dir                                               \
+#  --username research                                               \
+#  --password-file /user/ellery/sqoop.password                       \
+#  --split-by a.ll_from                                              \
+#  --hive-import                                                     \
+#  --hive-database %(hive_db)s                                        \
+#  --create-hive-table                                               \
+#  --hive-table %(result_table)s                                         \
+#  --hive-delims-replacement ' '                                  \
+#  --query '
+#SELECT
+#  ll_from,
+#  regexp_replace(CAST(ll_title AS CHAR(255) CHARSET utf8), ' ', '_')  AS ll_title,
+#  CAST(ll_lang AS CHAR(20) CHARSET utf8) AS ll_lang
+#FROM langlinks
+#WHERE $CONDITIONS
+#'
+#"""
+
+####################################################################
+####################################################################
+
 
 queries = {
-  'page' : {'sqoop': page_sqoop_query},
-  'redirect': {'sqoop': redirect_sqoop_query,  'join': redirect_join_query},
-  'langlinks': {'sqoop': langlinks_sqoop_query, 'join': langlinks_join_query},
-  'pagelinks': {'sqoop': pagelinks_sqoop_query, 'join': pagelinks_join_query},
-  'page_props': {'sqoop': page_props_sqoop_query, 'join': page_props_join_query},
-  'revision': {'sqoop': revision_sqoop_query, 'join': 'NOT IMPLEMENTED'},
+  'page' : {'sqoop': page_sqoop_query, 'clean': clean_page_query},
+  'redirect': {'sqoop': redirect_sqoop_query,  'clean': clean_redirect_query},
+  'pagelinks': {'sqoop': pagelinks_sqoop_query, 'clean': clean_pagelinks_query},
+  'page_props': {'sqoop': page_props_sqoop_query, 'clean': clean_page_props_query},
+  'revision': {'sqoop': revision_sqoop_query, 'clean': clean_revision_query},
 }
 
-
-def exec_hive(statement):
-  cmd =  """hive -e " """ + statement + """ " """
-  print (cmd)
-  ret =  os.system( cmd )
-  assert ret == 0
-  return ret
 
 def exec_sqoop(statement):
   ret =  os.system(statement)
@@ -261,17 +352,13 @@ def sqoop_prod_dbs(db, langs, tables):
       for table in tables:
 
         params = {'hive_db': db,
-               'raw_page_table': lang + '_' + 'page' + '_raw',
+               'page_table': lang + '_' + 'page' + '_raw',
                'raw_table': lang + '_' + table + '_raw',
                'result_table': lang + '_'  + table,
                }
 
-
-        if table == 'page':
-          continue
-
         ret += exec_hive(delete_query % params)
-        ret += exec_hive(queries[table]['join'] % params)
+        ret += exec_hive(queries[table]['clean'] % params, priority=True)
 
 
        
@@ -289,7 +376,3 @@ if __name__ == '__main__':
   tables = args.tables.split(',') 
   db = args.db
   sqoop_prod_dbs(db, langs, tables)
-
-
-
-
