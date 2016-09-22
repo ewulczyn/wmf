@@ -25,7 +25,6 @@ namespace and whether it is a redirect.
 ####################################################################
 ####################################################################
 
-# main namespace articles (no redirects)
 page_sqoop_query = """
 sqoop import                                                        \
   --connect jdbc:mysql://analytics-store.eqiad.wmnet/%(mysql_db)s    \
@@ -71,7 +70,6 @@ FROM
 ####################################################################
 
 
-# main namespace redirects
 redirect_sqoop_query = """
 sqoop import                                                        \
   --connect jdbc:mysql://analytics-store.eqiad.wmnet/%(mysql_db)s      \
@@ -102,13 +100,13 @@ ROW FORMAT DELIMITED
 FIELDS TERMINATED BY '\t'
 STORED AS TEXTFILE
 AS SELECT 
-  pfrom.page_id as rd_from_id,
-  pfrom.page_namespace as rd_from_namespace,
-  pfrom.page_is_redirect as rd_from_is_redirect,
+  pfrom.page_id as rd_from_page_id,
+  pfrom.page_namespace as rd_from_page_namespace,
+  pfrom.page_is_redirect as rd_from_page_is_redirect,
   pfrom.page_title as rd_from_page_title,
-  pto.page_id as rd_to_id,
-  pto.page_namespace as rd_to_namespace,
-  pto.page_is_redirect as rd_to_is_redirect,
+  pto.page_id as rd_to_page_id,
+  pto.page_namespace as rd_to_page_namespace,
+  pto.page_is_redirect as rd_to_page_is_redirect,
   pto.page_title as rd_to_page_title
 FROM
   %(hive_db)s.%(raw_table)s a 
@@ -165,7 +163,6 @@ FROM
 ####################################################################
 
 
-# main namespace pagelinks
 pagelinks_sqoop_query = """
 sqoop import                                                  \
   --connect jdbc:mysql://analytics-store.eqiad.wmnet/%(mysql_db)s      \
@@ -191,19 +188,20 @@ WHERE $CONDITIONS
 '
 """
 
+# note that redirects are not resolved. In fact redirect are links and included in this table
 clean_pagelinks_query = """
 CREATE TABLE  %(hive_db)s.%(result_table)s 
 ROW FORMAT DELIMITED
 FIELDS TERMINATED BY '\t'
 STORED AS TEXTFILE
 AS SELECT
-  pfrom.page_id as pl_from_id,
-  pfrom.page_namespace as pl_from_namespace,
-  pfrom.page_is_redirect as pl_from_is_redirect,
+  pfrom.page_id as pl_from_page_id,
+  pfrom.page_namespace as pl_from_page_namespace,
+  pfrom.page_is_redirect as pl_from_page_is_redirect,
   pfrom.page_title as pl_from_page_title,
-  pto.page_id as pl_to_id,
-  pto.page_namespace as pl_to_namespace,
-  pto.page_is_redirect as pl_to_is_redirect,
+  pto.page_id as pl_to_page_id,
+  pto.page_namespace as pl_to_page_namespace,
+  pto.page_is_redirect as pl_to_page_is_redirect,
   pto.page_title as pl_to_page_title
 FROM
   %(hive_db)s.%(raw_table)s a 
